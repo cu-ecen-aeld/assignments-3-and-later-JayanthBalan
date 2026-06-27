@@ -16,7 +16,10 @@ bool do_system(const char *cmd)
  *   and return a boolean true if the system() call completed with success
  *   or false() if it returned a failure
 */
-
+    int status = system(cmd);
+    if(status != 0) {
+        return false;
+    }
     return true;
 }
 
@@ -47,7 +50,7 @@ bool do_exec(int count, ...)
     command[count] = NULL;
     // this line is to avoid a compile warning before your implementation is complete
     // and may be removed
-    command[count] = command[count];
+    // command[count] = command[count];
 
 /*
  * TODO:
@@ -58,10 +61,30 @@ bool do_exec(int count, ...)
  *   as second argument to the execv() command.
  *
 */
+    int child_proc_status; // exit status of the child process
+    pid_t process_id = fork();
+    if(process_id < 0) { // fork error
+        perror("fork");
+        va_end(args);
+        return false;
+    }
+    else if(process_id == 0) { // child process
+        execv(command[0], command);
+        perror("execv");
+        va_end(args);
+        exit(EXIT_FAILURE);
+    }
+    else { // parent process
+        if(wait(&child_proc_status) == -1) {
+            perror("wait");
+            va_end(args);
+            return false;
+        }
+    }
 
     va_end(args);
 
-    return true;
+    return WIFEXITED(child_proc_status) && !WEXITSTATUS(child_proc_status);
 }
 
 /**
@@ -82,7 +105,7 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
     command[count] = NULL;
     // this line is to avoid a compile warning before your implementation is complete
     // and may be removed
-    command[count] = command[count];
+    // command[count] = command[count];
 
 
 /*
@@ -92,8 +115,43 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *   The rest of the behaviour is same as do_exec()
  *
 */
-
+    int child_proc_stat, fd = open(outputfile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if(fd < 0) {
+        perror("open");
+        va_end(args);
+        return false;
+    }
+    
+    pid_t pid = fork();
+    if(pid < 0) { // fork error
+        perror("fork");
+        va_end(args);
+        close(fd);
+        return false;
+    }
+    else if(pid == 0) { // Child process
+        if(dup2(fd, STDOUT_FILENO) == -1) {
+            perror("dup2");
+            va_end(args);
+            close(fd);
+            exit(EXIT_FAILURE);
+        }
+        close(fd);
+        execv(command[0], command);
+        perror("execv");
+        va_end(args);
+        exit(EXIT_FAILURE);
+    }
+    else {
+        if(wait(&child_proc_stat) == -1) {
+            perror("wait");
+            va_end(args);
+            close(fd);
+            return false;
+        }
+    }
+    close(fd);
     va_end(args);
 
-    return true;
+    return WIFEXITED(child_proc_stat) && !WEXITSTATUS(child_proc_stat);
 }
