@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 
 # Inputs
 if [ $# -ne 2 ]
