@@ -1,0 +1,14 @@
+#!/bin/sh
+
+case "$1" in
+  start)
+    start-stop-daemon -S -n aesdsocket -a aesdsocket -- -d
+    ;;
+  stop)
+    start-stop-daemon -K -n aesdsocket
+    ;;
+  *)
+    exit 1
+esac
+
+exit 0
