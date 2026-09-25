@@ -11,13 +11,29 @@
 #include <syslog.h>
 #include <netdb.h>
 #include <arpa/inet.h>
+#include <pthread.h>
 
 #define PORT "9000"
 #define BACKLOG 10
 #define DATA_FILE "/var/tmp/aesdsocketdata"
 #define BUFFER_SIZE 1024
 
+#define CLIENT_ACCEPT_FAILURE_LIMIT_MAX 16
+
 static volatile sig_atomic_t exit_requested = 0;
+
+typedef struct connection_handler_argument {
+    struct sockaddr_storage client_addr;
+    int client_fd;
+} connection_handler_argument_t;
+
+typedef struct threadLL {
+    pthread_t threadConnection;
+    int client_fd;
+    struct threadLL *link;
+} threadLL_t;
+
+static pthread_mutex_t file_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static int handle_client(int client_fd);
 static int get_client_ip(struct sockaddr_storage *client_addr, char *ip_buffer, size_t ip_buffer_size);
@@ -25,6 +41,7 @@ static void signal_handler(int signo);
 static int append_packet(const char *packet, size_t packet_length);
 static int send_file_to_client(int client_fd);
 static int send_all(int fd, const char *buffer, size_t length);
+static void *socketConnectionHandler(void *arg);
 
 int main(int argc, char *argv[])
 {
@@ -35,7 +52,6 @@ int main(int argc, char *argv[])
     struct addrinfo *servinfo = NULL;
     struct addrinfo *iter = NULL;
 
-    // CLA
     if (argc > 2) {
         return -1;
     }
@@ -51,7 +67,6 @@ int main(int argc, char *argv[])
 
     openlog("aesdsocket", LOG_PID | LOG_CONS, LOG_USER);
 
-    // Signal Handling
     struct sigaction sa = {0};
     sa.sa_handler = signal_handler;
     sigemptyset(&sa.sa_mask);
@@ -68,14 +83,22 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    // Server Address Configuration
+    sigset_t signal_set;
+    sigemptyset(&signal_set);
+    sigaddset(&signal_set, SIGINT);
+    sigaddset(&signal_set, SIGTERM);
+
+    if (pthread_sigmask(SIG_BLOCK, &signal_set, NULL) != 0) {
+        syslog(LOG_ERR, "pthread_sigmask failed");
+        closelog();
+        return -1;
+    }
+
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE;
     hints.ai_protocol = 0;
 
-
-    // Local Address Info
     int status = getaddrinfo(NULL, PORT, &hints, &servinfo);
     if (status != 0) {
         syslog(LOG_ERR, "getaddrinfo: %s", gai_strerror(status));
@@ -83,7 +106,6 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    // Address Iteration
     for (iter = servinfo; iter != NULL; iter = iter->ai_next) {
         server_fd = socket(iter->ai_family, iter->ai_socktype, iter->ai_protocol);
         if (server_fd == -1) {
@@ -105,6 +127,7 @@ int main(int argc, char *argv[])
         close(server_fd);
         server_fd = -1;
     }
+
     if (iter == NULL || server_fd == -1) {
         syslog(LOG_ERR, "Failed to bind socket");
         freeaddrinfo(servinfo);
@@ -112,7 +135,6 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    // Daemon vs Process
     if (daemon_mode) {
         pid_t pid = fork();
         if (pid < 0) {
@@ -150,6 +172,7 @@ int main(int argc, char *argv[])
         dup2(devnull, STDIN_FILENO);
         dup2(devnull, STDOUT_FILENO);
         dup2(devnull, STDERR_FILENO);
+
         if (devnull > STDERR_FILENO) {
             close(devnull);
         }
@@ -158,7 +181,13 @@ int main(int argc, char *argv[])
     freeaddrinfo(servinfo);
     servinfo = NULL;
 
-    // Acquire Connections
+    if (pthread_sigmask(SIG_UNBLOCK, &signal_set, NULL) != 0) {
+        syslog(LOG_ERR, "pthread_sigmask failed");
+        close(server_fd);
+        closelog();
+        return -1;
+    }
+
     if (listen(server_fd, BACKLOG) == -1) {
         syslog(LOG_ERR, "listen failed: %s", strerror(errno));
         close(server_fd);
@@ -166,39 +195,93 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    // Infinity
-    while (!exit_requested) {
-        struct sockaddr_storage client_addr;
-        socklen_t client_addr_len = sizeof(client_addr);
+    static unsigned int client_accept_failure_count = 0;
+    threadLL_t *threadHead = (threadLL_t*)malloc(sizeof(threadLL_t));
 
-        int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &client_addr_len);
-        if (client_fd == -1) {
-            if (errno == EINTR) {
-                if (exit_requested) {
-                    break;
-                }
-                continue;
-            }
-            syslog(LOG_ERR, "accept failed: %s", strerror(errno));
+    if (threadHead == NULL) {
+        syslog(LOG_ERR, "Linked List Allocation Failed");
+        close(server_fd);
+        closelog();
+        return -1;
+    }
+
+    threadLL_t *temp = threadHead;
+    threadHead->link = NULL;
+
+    while (!exit_requested) {
+        connection_handler_argument_t *argument = (connection_handler_argument_t*)malloc(sizeof(connection_handler_argument_t));
+
+        if (argument == NULL) {
+            syslog(LOG_ERR, "malloc() Failed: %s", strerror(errno));
             break;
         }
 
-        // Client IP
-        char client_ip[INET6_ADDRSTRLEN];
-        if (get_client_ip(&client_addr, client_ip, sizeof(client_ip)) == -1) {
-            strncpy(client_ip, "unknown", sizeof(client_ip));
-            client_ip[sizeof(client_ip) - 1] = '\0';
+        socklen_t client_addr_len = sizeof(argument->client_addr);
+        argument->client_fd = accept(server_fd, (struct sockaddr *)&argument->client_addr, &client_addr_len);
+
+        if (argument->client_fd == -1) {
+            if (errno == EINTR) {
+                free(argument);
+                continue;
+            }
+
+            syslog(LOG_ERR, "accept failed: %s", strerror(errno));
+
+            if (++client_accept_failure_count >= CLIENT_ACCEPT_FAILURE_LIMIT_MAX) {
+                syslog(LOG_CRIT, "Critical Process Error: Multiple Client accept() Failures: Process Terminating");
+                free(argument);
+                break;
+            }
+
+            free(argument);
+            continue;
         }
 
-        syslog(LOG_INFO, "Accepted connection from %s", client_ip);
-        handle_client(client_fd);
+        client_accept_failure_count = 0;
+        temp->client_fd = argument->client_fd;
 
-        close(client_fd);
-        syslog(LOG_INFO, "Closed connection from %s", client_ip);
+        if (pthread_create(&temp->threadConnection, NULL, socketConnectionHandler, argument) != 0) {
+            syslog(LOG_ERR, "pthread_create() Failed");
+            close(argument->client_fd);
+            free(argument);
+            temp->client_fd = -1;
+            continue;
+        }
+
+        temp->link = (threadLL_t*)malloc(sizeof(threadLL_t));
+
+        if (temp->link == NULL) {
+            syslog(LOG_ERR, "Linked List Allocation Failed");
+            exit_requested = 1;
+            break;
+        }
+
+        temp = temp->link;
+        temp->link = NULL;
+    }
+
+    close(server_fd);
+
+    for (threadLL_t *temp2 = threadHead; temp2 != NULL; temp2 = temp2->link) {
+        if (temp2->client_fd > 0) {
+            shutdown(temp2->client_fd, SHUT_RDWR);
+        }
+    }
+
+    for (threadLL_t *temp2 = threadHead; temp2 != NULL; temp2 = temp2->link) {
+        if (temp2->client_fd > 0) {
+            pthread_join(temp2->threadConnection, NULL);
+        }
+    }
+
+    threadLL_t *temp2 = threadHead;
+    while (temp2 != NULL) {
+        threadLL_t *next = temp2->link;
+        free(temp2);
+        temp2 = next;
     }
 
     syslog(LOG_INFO, "Caught signal, exiting");
-    close(server_fd);
 
     if (unlink(DATA_FILE) == -1) {
         if (errno != ENOENT) {
@@ -208,6 +291,29 @@ int main(int argc, char *argv[])
 
     closelog();
     return 0;
+}
+
+static void *socketConnectionHandler(void *arg)
+{
+    connection_handler_argument_t argument = *((connection_handler_argument_t*)arg);
+    free(arg);
+
+    char client_ip[INET6_ADDRSTRLEN];
+
+    if (get_client_ip(&(argument.client_addr), client_ip, sizeof(client_ip)) == -1) {
+        strncpy(client_ip, "unknown", sizeof(client_ip));
+        client_ip[sizeof(client_ip) - 1] = '\0';
+        close(argument.client_fd);
+        return NULL;
+    }
+
+    syslog(LOG_INFO, "Accepted connection from %s", client_ip);
+    handle_client(argument.client_fd);
+
+    close(argument.client_fd);
+    syslog(LOG_INFO, "Closed connection from %s", client_ip);
+
+    return NULL;
 }
 
 static int handle_client(int client_fd)
@@ -220,6 +326,7 @@ static int handle_client(int client_fd)
 
     while (!exit_requested) {
         ssize_t bytes_received = recv(client_fd, recv_buffer, sizeof(recv_buffer), 0);
+
         if (bytes_received < 0) {
             if (errno == EINTR) {
                 if (exit_requested) {
@@ -227,10 +334,16 @@ static int handle_client(int client_fd)
                 }
                 continue;
             }
+
+            if (exit_requested) {
+                break;
+            }
+
             syslog(LOG_ERR, "recv failed: %s", strerror(errno));
             free(packet_buffer);
             return -1;
         }
+
         if (bytes_received == 0) {
             break;
         }
@@ -238,6 +351,7 @@ static int handle_client(int client_fd)
         for (ssize_t i = 0; i < bytes_received; i++) {
             if (packet_length + 1 > packet_capacity) {
                 size_t new_capacity;
+
                 if (packet_capacity == 0) {
                     new_capacity = 1024;
                 }
@@ -246,6 +360,7 @@ static int handle_client(int client_fd)
                 }
 
                 char *new_buffer = realloc(packet_buffer, new_capacity);
+
                 if (new_buffer == NULL) {
                     syslog(LOG_ERR, "malloc/realloc failed while receiving packet");
                     free(packet_buffer);
@@ -264,14 +379,17 @@ static int handle_client(int client_fd)
                     free(packet_buffer);
                     return -1;
                 }
+
                 if (send_file_to_client(client_fd) == -1) {
                     free(packet_buffer);
                     return -1;
                 }
+
                 packet_length = 0;
             }
         }
     }
+
     free(packet_buffer);
     return 0;
 }
@@ -302,25 +420,33 @@ static int get_client_ip(struct sockaddr_storage *client_addr, char *ip_buffer, 
 static int append_packet(const char *packet, size_t packet_length)
 {
     int file_fd = open(DATA_FILE, O_WRONLY | O_CREAT | O_APPEND, 0644);
+
     if (file_fd == -1) {
         syslog(LOG_ERR, "Failed to open %s for writing: %s", DATA_FILE, strerror(errno));
         return -1;
     }
 
     size_t total_written = 0;
+    pthread_mutex_lock(&file_mutex);
+
     while (total_written < packet_length) {
         ssize_t written = write(file_fd, packet + total_written, packet_length - total_written);
+
         if (written < 0) {
             if (errno == EINTR) {
                 continue;
             }
+
+            pthread_mutex_unlock(&file_mutex);
             syslog(LOG_ERR, "Failed to write %s: %s", DATA_FILE, strerror(errno));
             close(file_fd);
             return -1;
         }
+
         total_written += written;
     }
 
+    pthread_mutex_unlock(&file_mutex);
     close(file_fd);
     return 0;
 }
@@ -333,16 +459,18 @@ static int send_file_to_client(int client_fd)
     file_fd = open(DATA_FILE, O_RDONLY);
 
     if (file_fd == -1) {
-        syslog(LOG_ERR, "Failed to open %s: %s", DATA_FILE, strerror(errno));
+        syslog(LOG_ERR, "Failed to open %s for reading: %s", DATA_FILE, strerror(errno));
         return -1;
     }
 
     while (1) {
         ssize_t bytes_read = read(file_fd, buffer, sizeof(buffer));
+
         if (bytes_read < 0) {
             if (errno == EINTR) {
                 continue;
             }
+
             syslog(LOG_ERR, "Failed to read %s: %s", DATA_FILE, strerror(errno));
             close(file_fd);
             return -1;
@@ -353,7 +481,10 @@ static int send_file_to_client(int client_fd)
         }
 
         if (send_all(client_fd, buffer, bytes_read) == -1) {
-            syslog(LOG_ERR, "Failed to send file to client: %s", strerror(errno));
+            if (!exit_requested) {
+                syslog(LOG_ERR, "Failed to send file to client: %s", strerror(errno));
+            }
+
             close(file_fd);
             return -1;
         }
@@ -363,8 +494,6 @@ static int send_file_to_client(int client_fd)
     return 0;
 }
 
-
-// SIGINT/SIGTERM
 static void signal_handler(int signo)
 {
     if (signo == SIGINT || signo == SIGTERM) {
@@ -375,8 +504,10 @@ static void signal_handler(int signo)
 static int send_all(int fd, const char *buffer, size_t length)
 {
     size_t total_sent = 0;
+
     while (total_sent < length) {
         ssize_t sent = send(fd, buffer + total_sent, length - total_sent, 0);
+
         if (sent < 0) {
             if (errno == EINTR) {
                 if (exit_requested) {
@@ -384,6 +515,7 @@ static int send_all(int fd, const char *buffer, size_t length)
                 }
                 continue;
             }
+
             return -1;
         }
 
