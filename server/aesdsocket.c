@@ -12,12 +12,14 @@
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <pthread.h>
+#include <time.h>
 
 #define PORT "9000"
 #define BACKLOG 10
 #define DATA_FILE "/var/tmp/aesdsocketdata"
 #define BUFFER_SIZE 1024
 
+#define SLEEP_TIME 10
 #define CLIENT_ACCEPT_FAILURE_LIMIT_MAX 16
 
 static volatile sig_atomic_t exit_requested = 0;
@@ -42,6 +44,7 @@ static int append_packet(const char *packet, size_t packet_length);
 static int send_file_to_client(int client_fd);
 static int send_all(int fd, const char *buffer, size_t length);
 static void *socketConnectionHandler(void *arg);
+static void *timestamp_handler(void *arg);
 
 int main(int argc, char *argv[])
 {
@@ -188,6 +191,12 @@ int main(int argc, char *argv[])
         return -1;
     }
 
+    if (unlink(DATA_FILE) == -1) {
+        if (errno != ENOENT) {
+            syslog(LOG_ERR, "Failed to delete %s: %s", DATA_FILE, strerror(errno));
+        }
+    }
+
     if (listen(server_fd, BACKLOG) == -1) {
         syslog(LOG_ERR, "listen failed: %s", strerror(errno));
         close(server_fd);
@@ -197,9 +206,18 @@ int main(int argc, char *argv[])
 
     static unsigned int client_accept_failure_count = 0;
     threadLL_t *threadHead = (threadLL_t*)malloc(sizeof(threadLL_t));
-
     if (threadHead == NULL) {
         syslog(LOG_ERR, "Linked List Allocation Failed");
+        close(server_fd);
+        closelog();
+        return -1;
+    }
+
+    threadHead->client_fd = -1;
+
+    pthread_t timestamp_thread;
+    if (pthread_create(&timestamp_thread, NULL, timestamp_handler, NULL) != 0) {
+        syslog(LOG_ERR, "pthread_create() Failed");
         close(server_fd);
         closelog();
         return -1;
@@ -257,6 +275,7 @@ int main(int argc, char *argv[])
         }
 
         temp = temp->link;
+        temp->client_fd = -1;
         temp->link = NULL;
     }
 
@@ -274,6 +293,8 @@ int main(int argc, char *argv[])
         }
     }
 
+    pthread_join(timestamp_thread, NULL);
+
     threadLL_t *temp2 = threadHead;
     while (temp2 != NULL) {
         threadLL_t *next = temp2->link;
@@ -282,15 +303,27 @@ int main(int argc, char *argv[])
     }
 
     syslog(LOG_INFO, "Caught signal, exiting");
-
-    if (unlink(DATA_FILE) == -1) {
-        if (errno != ENOENT) {
-            syslog(LOG_ERR, "Failed to delete %s: %s", DATA_FILE, strerror(errno));
-        }
-    }
-
     closelog();
     return 0;
+}
+
+static void *timestamp_handler(void *arg)
+{
+    (void)arg;
+    struct timespec currtime;
+    char buffer[150];
+    struct tm *time_info;
+    struct timespec delay = {.tv_nsec = 0, .tv_sec = SLEEP_TIME};
+
+    while(!exit_requested) {
+        clock_gettime(CLOCK_REALTIME, &currtime);
+        time_info = localtime(&currtime.tv_sec);
+        strftime(buffer, sizeof(buffer), "timestamp:%a, %d %b %Y %H:%M:%S %z\n", time_info);
+        append_packet(buffer, strlen(buffer));
+        nanosleep(&delay, NULL);
+    }
+
+    return NULL;
 }
 
 static void *socketConnectionHandler(void *arg)
