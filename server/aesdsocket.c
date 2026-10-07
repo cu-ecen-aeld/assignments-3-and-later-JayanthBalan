@@ -16,8 +16,13 @@
 
 #define PORT "9000"
 #define BACKLOG 10
-#define DATA_FILE "/var/tmp/aesdsocketdata"
 #define BUFFER_SIZE 1024
+
+#if USE_AESD_CHAR_DEVICE == 0
+    #define DATA_FILE "/var/tmp/aesdsocketdata"
+#else
+    #define DATA_FILE "/dev/aesdchar"
+#endif
 
 #define SLEEP_TIME 10
 #define CLIENT_ACCEPT_FAILURE_LIMIT_MAX 16
@@ -44,7 +49,10 @@ static int append_packet(const char *packet, size_t packet_length);
 static int send_file_to_client(int client_fd);
 static int send_all(int fd, const char *buffer, size_t length);
 static void *socketConnectionHandler(void *arg);
-static void *timestamp_handler(void *arg);
+
+#if USE_AESD_CHAR_DEVICE == 0
+    static void *timestamp_handler(void *arg);
+#endif
 
 int main(int argc, char *argv[])
 {
@@ -191,11 +199,13 @@ int main(int argc, char *argv[])
         return -1;
     }
 
+#if USE_AESD_CHAR_DEVICE == 0
     if (unlink(DATA_FILE) == -1) {
         if (errno != ENOENT) {
             syslog(LOG_ERR, "Failed to delete %s: %s", DATA_FILE, strerror(errno));
         }
     }
+#endif
 
     if (listen(server_fd, BACKLOG) == -1) {
         syslog(LOG_ERR, "listen failed: %s", strerror(errno));
@@ -215,6 +225,7 @@ int main(int argc, char *argv[])
 
     threadHead->client_fd = -1;
 
+#if USE_AESD_CHAR_DEVICE == 0
     pthread_t timestamp_thread;
     if (pthread_create(&timestamp_thread, NULL, timestamp_handler, NULL) != 0) {
         syslog(LOG_ERR, "pthread_create() Failed");
@@ -222,6 +233,7 @@ int main(int argc, char *argv[])
         closelog();
         return -1;
     }
+#endif
 
     threadLL_t *temp = threadHead;
     threadHead->link = NULL;
@@ -293,7 +305,9 @@ int main(int argc, char *argv[])
         }
     }
 
+#if USE_AESD_CHAR_DEVICE == 0
     pthread_join(timestamp_thread, NULL);
+#endif
 
     threadLL_t *temp2 = threadHead;
     while (temp2 != NULL) {
@@ -307,24 +321,26 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-static void *timestamp_handler(void *arg)
-{
-    (void)arg;
-    struct timespec currtime;
-    char buffer[150];
-    struct tm *time_info;
-    struct timespec delay = {.tv_nsec = 0, .tv_sec = SLEEP_TIME};
+#if USE_AESD_CHAR_DEVICE == 0
+    static void *timestamp_handler(void *arg)
+    {
+        (void)arg;
+        struct timespec currtime;
+        char buffer[150];
+        struct tm *time_info;
+        struct timespec delay = {.tv_nsec = 0, .tv_sec = SLEEP_TIME};
 
-    while(!exit_requested) {
-        clock_gettime(CLOCK_REALTIME, &currtime);
-        time_info = localtime(&currtime.tv_sec);
-        strftime(buffer, sizeof(buffer), "timestamp:%a, %d %b %Y %H:%M:%S %z\n", time_info);
-        append_packet(buffer, strlen(buffer));
-        nanosleep(&delay, NULL);
+        while(!exit_requested) {
+            clock_gettime(CLOCK_REALTIME, &currtime);
+            time_info = localtime(&currtime.tv_sec);
+            strftime(buffer, sizeof(buffer), "timestamp:%a, %d %b %Y %H:%M:%S %z\n", time_info);
+            append_packet(buffer, strlen(buffer));
+            nanosleep(&delay, NULL);
+        }
+
+        return NULL;
     }
-
-    return NULL;
-}
+#endif
 
 static void *socketConnectionHandler(void *arg)
 {
@@ -452,7 +468,11 @@ static int get_client_ip(struct sockaddr_storage *client_addr, char *ip_buffer, 
 
 static int append_packet(const char *packet, size_t packet_length)
 {
+#if USE_AESD_CHAR_DEVICE == 0
     int file_fd = open(DATA_FILE, O_WRONLY | O_CREAT | O_APPEND, 0644);
+#else
+    int file_fd = open(DATA_FILE, O_WRONLY);
+#endif
 
     if (file_fd == -1) {
         syslog(LOG_ERR, "Failed to open %s for writing: %s", DATA_FILE, strerror(errno));

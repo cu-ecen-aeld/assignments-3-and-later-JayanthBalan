@@ -26,7 +26,7 @@
 int aesd_major = 0; // use dynamic major
 int aesd_minor = 0;
 
-MODULE_AUTHOR("Jayanth Sinnakavadi Balan"); /** fill in your name **/
+MODULE_AUTHOR("Jayanth Balan"); /** fill in your name **/
 MODULE_LICENSE("Dual BSD/GPL");
 
 struct aesd_dev aesd_device;
@@ -60,7 +60,7 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count, loff_t *f_p
     struct aesd_dev *dev = filp->private_data;
     PDEBUG("read %zu bytes with offset %lld", count, *f_pos);
     /**
-     * TODO: handle read
+     * handle read
      */
     if(count == 0) {
         return 0;
@@ -112,7 +112,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
     struct aesd_dev *dev = filp->private_data;
     PDEBUG("write %zu bytes with offset %lld", count, *f_pos);
     /**
-     * TODO: handle write
+     * handle write
      */
     if(count == 0) {
         return 0;
@@ -282,7 +282,7 @@ void aesd_cleanup_module(void)
     cdev_del(&aesd_device.cdev);
 
     /**
-     * TODO: cleanup AESD specific poritions here as necessary
+     * cleanup AESD specific poritions here as necessary
      */
     kfree(aesd_device.working_entry.buffptr);
 
