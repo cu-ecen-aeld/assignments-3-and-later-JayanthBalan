@@ -1,3 +1,4 @@
+
 /**
  * @file aesdchar.c
  * @brief Functions and data related to the AESD char driver implementation
@@ -108,6 +109,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
     const char *newline;
     char *new_buffer;
     char *pending_buffer = NULL;
+    char *entry_buffer;
     struct aesd_buffer_entry *new_entries = NULL;
     struct aesd_dev *dev = filp->private_data;
     PDEBUG("write %zu bytes with offset %lld", count, *f_pos);
@@ -166,8 +168,8 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
     while(command_index < command_count) {
         newline = memchr(new_buffer + command_start, '\n', total_size - command_start);
         command_size = newline - (new_buffer + command_start) + 1;
-        new_entries[command_index].buffptr = kmalloc(command_size, GFP_KERNEL);
-        if(!new_entries[command_index].buffptr) {
+        entry_buffer = kmalloc(command_size, GFP_KERNEL);
+        if(!entry_buffer) {
             while(command_index > 0) {
                 command_index--;
                 kfree(new_entries[command_index].buffptr);
@@ -178,8 +180,9 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
             return -ENOMEM;
         }
 
+        new_entries[command_index].buffptr = entry_buffer;
         new_entries[command_index].size = command_size;
-        memcpy(new_entries[command_index].buffptr, new_buffer + command_start, command_size);
+        memcpy(entry_buffer, new_buffer + command_start, command_size);
         command_start += command_size;
         command_index++;
     }
