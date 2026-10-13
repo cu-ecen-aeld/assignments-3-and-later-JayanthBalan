@@ -23,6 +23,7 @@
 #include <linux/mutex.h>
 #include <linux/string.h>
 #include "aesdchar.h"
+#include "aesd_ioctl.h"
 
 int aesd_major = 0; // use dynamic major
 int aesd_minor = 0;
@@ -226,12 +227,38 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count, loff
     return retval;
 }
 
+static loff_t aesd_llseek(struct file *filp, loff_t offset, int whence)
+{
+    loff_t retval;
+    size_t device_size = 0;
+    uint8_t index;
+    struct aesd_buffer_entry *entry;
+    struct aesd_dev *dev = filp->private_data;
+
+    PDEBUG("llseek");
+
+    mutex_lock(&dev->lock);
+
+    AESD_CIRCULAR_BUFFER_FOREACH(entry, &dev->buffer, index) {
+        device_size += entry->size;
+    }
+
+    retval = fixed_size_llseek(filp, offset, whence, device_size);
+
+    mutex_unlock(&dev->lock);
+
+    PDEBUG("llseek returning %lld", retval);
+
+    return retval;
+}
+
 struct file_operations aesd_fops = {
-    .owner =    THIS_MODULE,
-    .read =     aesd_read,
-    .write =    aesd_write,
-    .open =     aesd_open,
-    .release =  aesd_release,
+    .owner = THIS_MODULE,
+    .read = aesd_read,
+    .write = aesd_write,
+    .open = aesd_open,
+    .release = aesd_release,
+    .llseek = aesd_llseek
 };
 
 static int aesd_setup_cdev(struct aesd_dev *dev)
