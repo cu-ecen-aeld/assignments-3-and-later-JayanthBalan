@@ -13,6 +13,8 @@
 #include <arpa/inet.h>
 #include <pthread.h>
 #include <time.h>
+#include <stdint.h>
+#include "aesd_ioctl.h"
 
 #define PORT "9000"
 #define BACKLOG 10
@@ -26,6 +28,8 @@
 
 #define SLEEP_TIME 10
 #define CLIENT_ACCEPT_FAILURE_LIMIT_MAX 16
+
+#define IOCTL_TARGET "AESDCHAR_IOCSEEKTO:\0"
 
 static volatile sig_atomic_t exit_requested = 0;
 
@@ -47,8 +51,10 @@ static int get_client_ip(struct sockaddr_storage *client_addr, char *ip_buffer, 
 static void signal_handler(int signo);
 static int append_packet(const char *packet, size_t packet_length);
 static int send_file_to_client(int client_fd);
+static int send_file_to_client_ioctl(int client_fd, int file_fd);
 static int send_all(int fd, const char *buffer, size_t length);
 static void *socketConnectionHandler(void *arg);
+static int getIOCTL(const char *packet, size_t packet_length, int client_fd);
 
 #if USE_AESD_CHAR_DEVICE == 0
     static void *timestamp_handler(void *arg);
@@ -424,6 +430,26 @@ static int handle_client(int client_fd)
             packet_length++;
 
             if (recv_buffer[i] == '\n') {
+#if USE_AESD_CHAR_DEVICE != 0
+                int retval_ioctl = getIOCTL(packet_buffer, packet_length, client_fd);
+
+                if (retval_ioctl < 0) {
+                    free(packet_buffer);
+                    return -1;
+                }
+
+                if (retval_ioctl == 0) {
+                    if (append_packet(packet_buffer, packet_length) == -1) {
+                        free(packet_buffer);
+                        return -1;
+                    }
+
+                    if (send_file_to_client(client_fd) == -1) {
+                        free(packet_buffer);
+                        return -1;
+                    }
+                }
+#else
                 if (append_packet(packet_buffer, packet_length) == -1) {
                     free(packet_buffer);
                     return -1;
@@ -433,7 +459,7 @@ static int handle_client(int client_fd)
                     free(packet_buffer);
                     return -1;
                 }
-
+#endif
                 packet_length = 0;
             }
         }
@@ -466,6 +492,99 @@ static int get_client_ip(struct sockaddr_storage *client_addr, char *ip_buffer, 
     return 0;
 }
 
+static int getIOCTL(const char *packet, size_t packet_length, int client_fd) // changed
+{
+#if USE_AESD_CHAR_DEVICE != 0
+    struct aesd_seekto seekto = {0};
+    const size_t prefix_length = strlen(IOCTL_TARGET);
+    size_t pos = prefix_length;
+    uint64_t value = 0;
+    int file_fd;
+    int result;
+
+    if (packet_length < prefix_length || memcmp(packet, IOCTL_TARGET, prefix_length) != 0) {
+        return 0;
+    }
+
+    if (packet_length <= prefix_length || packet[packet_length - 1] != '\n') {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (pos >= packet_length - 1 || packet[pos] < '0' || packet[pos] > '9') {
+        errno = EINVAL;
+        return -1;
+    }
+
+    while (pos < packet_length - 1 && packet[pos] >= '0' && packet[pos] <= '9') {
+        value = value * 10 + (packet[pos] - '0');
+        if (value > UINT32_MAX) {
+            errno = EINVAL;
+            return -1;
+        }
+        pos++;
+    }
+
+    if (pos >= packet_length - 1 || packet[pos] != ',') {
+        errno = EINVAL;
+        return -1;
+    }
+
+    seekto.write_cmd = (uint32_t)value;
+    pos++;
+    value = 0;
+
+    if (pos >= packet_length - 1 || packet[pos] < '0' || packet[pos] > '9') {
+        errno = EINVAL;
+        return -1;
+    }
+
+    while (pos < packet_length - 1 && packet[pos] >= '0' && packet[pos] <= '9') {
+        value = value * 10 + (packet[pos] - '0');
+        if (value > UINT32_MAX) {
+            errno = EINVAL;
+            return -1;
+        }
+        pos++;
+    }
+
+    if (pos != packet_length - 1) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    seekto.write_cmd_offset = (uint32_t)value;
+
+    pthread_mutex_lock(&file_mutex);
+    file_fd = open(DATA_FILE, O_RDWR); // changed
+
+    if (file_fd == -1) {
+        pthread_mutex_unlock(&file_mutex);
+        syslog(LOG_ERR, "Failed to open %s: %s", DATA_FILE, strerror(errno));
+        return -1;
+    }
+
+    if (ioctl(file_fd, AESDCHAR_IOCSEEKTO, &seekto) == -1) {
+        syslog(LOG_ERR, "Failed to execute ioctl seek %s: %s", DATA_FILE, strerror(errno));
+        close(file_fd);
+        pthread_mutex_unlock(&file_mutex);
+        return -1;
+    }
+
+    result = send_file_to_client_ioctl(client_fd, file_fd);
+    close(file_fd);
+    pthread_mutex_unlock(&file_mutex);
+
+    return result == 0 ? 1 : -1;
+
+#else
+    (void)packet;
+    (void)packet_length;
+    (void)client_fd;
+    return 0;
+#endif
+}
+
 static int append_packet(const char *packet, size_t packet_length)
 {
 #if USE_AESD_CHAR_DEVICE == 0
@@ -481,6 +600,7 @@ static int append_packet(const char *packet, size_t packet_length)
 
     size_t total_written = 0;
     pthread_mutex_lock(&file_mutex);
+    
 
     while (total_written < packet_length) {
         ssize_t written = write(file_fd, packet + total_written, packet_length - total_written);
@@ -501,6 +621,42 @@ static int append_packet(const char *packet, size_t packet_length)
 
     pthread_mutex_unlock(&file_mutex);
     close(file_fd);
+    return 0;
+}
+
+static int send_file_to_client_ioctl(int client_fd, int file_fd) {
+    char buffer[BUFFER_SIZE];
+
+    if (file_fd == -1) {
+        syslog(LOG_ERR, "Failed to open %s for reading: %s", DATA_FILE, strerror(errno));
+        return -1;
+    }
+
+    while (1) {
+        ssize_t bytes_read = read(file_fd, buffer, sizeof(buffer));
+
+        if (bytes_read < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+
+            syslog(LOG_ERR, "Failed to read %s: %s", DATA_FILE, strerror(errno));
+            return -1;
+        }
+
+        if (bytes_read == 0) {
+            break;
+        }
+
+        if (send_all(client_fd, buffer, bytes_read) == -1) {
+            if (!exit_requested) {
+                syslog(LOG_ERR, "Failed to send file to client: %s", strerror(errno));
+            }
+
+            return -1;
+        }
+    }
+
     return 0;
 }
 
