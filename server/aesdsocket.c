@@ -13,6 +13,7 @@
 #include <arpa/inet.h>
 #include <pthread.h>
 #include <time.h>
+#include <sys/ioctl.h>
 #include <stdint.h>
 #include "aesd_ioctl.h"
 
@@ -29,7 +30,7 @@
 #define SLEEP_TIME 10
 #define CLIENT_ACCEPT_FAILURE_LIMIT_MAX 16
 
-#define IOCTL_TARGET "AESDCHAR_IOCSEEKTO:\0"
+#define IOCTL_TARGET "AESDCHAR_IOCSEEKTO:"
 
 static volatile sig_atomic_t exit_requested = 0;
 

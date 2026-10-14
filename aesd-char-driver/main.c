@@ -275,7 +275,9 @@ static long aesd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 
     mutex_lock(&dev->lock);
 
-    AESD_CIRCULAR_BUFFER_FOREACH(entry, &dev->buffer, index) {
+    for (index = dev->buffer.out_offs, command_index = 0; command_index < (dev->buffer.full ? AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED : dev->buffer.in_offs); command_index++, index = (index + 1) % AESDCHAR_MAX_WRITE_OPERATIONS_SUPPORTED) {
+        entry = &dev->buffer.entry[index];
+
         if (command_index == seekto.write_cmd) {
             if (seekto.write_cmd_offset >= entry->size) {
                 retval = -EINVAL;
@@ -289,7 +291,6 @@ static long aesd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
         }
 
         file_offset += entry->size;
-        command_index++;
     }
 
     if (!found) {
