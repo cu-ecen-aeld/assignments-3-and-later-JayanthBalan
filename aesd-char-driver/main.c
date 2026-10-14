@@ -252,13 +252,66 @@ static loff_t aesd_llseek(struct file *filp, loff_t offset, int whence)
     return retval;
 }
 
+static long aesd_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+    struct aesd_dev *dev = filp->private_data;
+    struct aesd_seekto seekto;
+    struct aesd_buffer_entry *entry;
+    loff_t file_offset = 0;
+    uint32_t command_index = 0;
+    uint8_t index;
+    long retval = 0;
+    bool found = false;
+
+    PDEBUG("ioctl command %u", cmd);
+
+    if (cmd != AESDCHAR_IOCSEEKTO) {
+        return -ENOTTY;
+    }
+
+    if (copy_from_user(&seekto, (void __user *)arg, sizeof(seekto))) {
+        return -EFAULT;
+    }
+
+    mutex_lock(&dev->lock);
+
+    AESD_CIRCULAR_BUFFER_FOREACH(entry, &dev->buffer, index) {
+        if (command_index == seekto.write_cmd) {
+            if (seekto.write_cmd_offset >= entry->size) {
+                retval = -EINVAL;
+                goto out;
+            }
+
+            file_offset += seekto.write_cmd_offset;
+            filp->f_pos = file_offset;
+            found = true;
+            break;
+        }
+
+        file_offset += entry->size;
+        command_index++;
+    }
+
+    if (!found) {
+        retval = -EINVAL;
+    }
+
+out:
+    mutex_unlock(&dev->lock);
+
+    PDEBUG("ioctl returning %ld, file position %lld", retval, filp->f_pos);
+
+    return retval;
+}
+
 struct file_operations aesd_fops = {
     .owner = THIS_MODULE,
     .read = aesd_read,
     .write = aesd_write,
     .open = aesd_open,
     .release = aesd_release,
-    .llseek = aesd_llseek
+    .llseek = aesd_llseek,
+    .unlocked_ioctl = aesd_ioctl
 };
 
 static int aesd_setup_cdev(struct aesd_dev *dev)
