@@ -495,7 +495,6 @@ static int get_client_ip(struct sockaddr_storage *client_addr, char *ip_buffer, 
 
 static int getIOCTL(const char *packet, size_t packet_length, int client_fd) // changed
 {
-#if USE_AESD_CHAR_DEVICE != 0
     struct aesd_seekto seekto = {0};
     const size_t prefix_length = strlen(IOCTL_TARGET);
     size_t pos = prefix_length;
@@ -577,13 +576,6 @@ static int getIOCTL(const char *packet, size_t packet_length, int client_fd) // 
     pthread_mutex_unlock(&file_mutex);
 
     return result == 0 ? 1 : -1;
-
-#else
-    (void)packet;
-    (void)packet_length;
-    (void)client_fd;
-    return 0;
-#endif
 }
 
 static int append_packet(const char *packet, size_t packet_length)
