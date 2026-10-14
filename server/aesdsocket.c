@@ -15,7 +15,7 @@
 #include <time.h>
 #include <sys/ioctl.h>
 #include <stdint.h>
-#include "aesd_ioctl.h"
+#include "../aesd-char-driver/aesd_ioctl.h"
 
 #define PORT "9000"
 #define BACKLOG 10
