@@ -431,9 +431,7 @@ static int handle_client(int client_fd)
             packet_length++;
 
             if (recv_buffer[i] == '\n') {
-#if USE_AESD_CHAR_DEVICE != 0
                 int retval_ioctl = getIOCTL(packet_buffer, packet_length, client_fd);
-
                 if (retval_ioctl < 0) {
                     free(packet_buffer);
                     return -1;
@@ -450,17 +448,6 @@ static int handle_client(int client_fd)
                         return -1;
                     }
                 }
-#else
-                if (append_packet(packet_buffer, packet_length) == -1) {
-                    free(packet_buffer);
-                    return -1;
-                }
-
-                if (send_file_to_client(client_fd) == -1) {
-                    free(packet_buffer);
-                    return -1;
-                }
-#endif
                 packet_length = 0;
             }
         }
@@ -575,7 +562,7 @@ static int getIOCTL(const char *packet, size_t packet_length, int client_fd) // 
     close(file_fd);
     pthread_mutex_unlock(&file_mutex);
 
-    return result == 0 ? 1 : -1;
+    return (result == 0 ? 1 : -1);
 }
 
 static int append_packet(const char *packet, size_t packet_length)
